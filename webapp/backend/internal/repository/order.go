@@ -47,6 +47,46 @@ func (r *OrderRepository) UpdateStatuses(ctx context.Context, orderIDs []int64, 
 	return err
 }
 
+// UpdateStatusesIfCurrentStatus
+// 仅当当前状态等于 fromStatus 时，才更新为 newStatus。
+// 返回实际被更新的行数，用于并发场景下做乐观锁控制。
+func (r *OrderRepository) UpdateStatusesIfCurrentStatus(
+    ctx context.Context,
+    orderIDs []int64,
+    fromStatus string,
+    newStatus string,
+) (int64, error) {
+    if len(orderIDs) == 0 {
+        return 0, nil
+    }
+
+    // 使用 sqlx.In 展开 IN (...)
+    query, args, err := sqlx.In(
+        `UPDATE orders
+         SET shipped_status = ?
+         WHERE shipped_status = ?
+           AND order_id IN (?)`,
+        newStatus,
+        fromStatus,
+        orderIDs,
+    )
+    if err != nil {
+        return 0, err
+    }
+
+    query = r.db.Rebind(query)
+    res, err := r.db.ExecContext(ctx, query, args...)
+    if err != nil {
+        return 0, err
+    }
+
+    rows, err := res.RowsAffected()
+    if err != nil {
+        return 0, err
+    }
+    return rows, nil
+}
+
 // 配送中(shipped_status:shipping)の注文一覧を取得
 func (r *OrderRepository) GetShippingOrders(ctx context.Context) ([]model.Order, error) {
 	var orders []model.Order

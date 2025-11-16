@@ -19,36 +19,51 @@ func NewRobotService(store *repository.Store) *RobotService {
 // 注意：このメソッドは、現在、ordersテーブルのshipped_statusが"shipping"になっている注文"全件"を対象に配送計画を立てます。
 // 注文の取得件数を制限した場合、ペナルティの対象になります。
 func (s *RobotService) GenerateDeliveryPlan(ctx context.Context, robotID string, capacity int) (*model.DeliveryPlan, error) {
-	var plan model.DeliveryPlan
+    var plan model.DeliveryPlan
 
-	err := utils.WithTimeout(ctx, func(ctx context.Context) error {
-		return s.store.ExecTx(ctx, func(txStore *repository.Store) error {
-			orders, err := txStore.OrderRepo.GetShippingOrders(ctx)
-			if err != nil {
-				return err
-			}
-			plan, err = selectOrdersForDelivery(ctx, orders, robotID, capacity)
-			if err != nil {
-				return err
-			}
-			if len(plan.Orders) > 0 {
-				orderIDs := make([]int64, len(plan.Orders))
-				for i, order := range plan.Orders {
-					orderIDs[i] = order.OrderID
-				}
+    err := utils.WithTimeout(ctx, func(ctx context.Context) error {
+        // 1. 事务外读取 & 计算（纯 CPU 操作 + 一次 SELECT）
+        orders, err := s.store.OrderRepo.GetShippingOrders(ctx)
+        if err != nil {
+            return err
+        }
 
-				if err := txStore.OrderRepo.UpdateStatuses(ctx, orderIDs, "delivering"); err != nil {
-					return err
-				}
-				log.Printf("Updated status to 'delivering' for %d orders", len(orderIDs))
-			}
-			return nil
-		})
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &plan, nil
+        localPlan, err := selectOrdersForDelivery(ctx, orders, robotID, capacity)
+        if err != nil {
+            return err
+        }
+        plan = localPlan
+
+        if len(plan.Orders) == 0 {
+            // 没有要配送的订单，直接返回，不开启事务
+            return nil
+        }
+
+        orderIDs := make([]int64, len(plan.Orders))
+        for i, order := range plan.Orders {
+            orderIDs[i] = order.OrderID
+        }
+
+        // 2. 事务内只做一次短 UPDATE（乐观锁：仅更新当前仍为 shipping 的订单）
+        return s.store.ExecTx(ctx, func(txStore *repository.Store) error {
+            rows, err := txStore.OrderRepo.UpdateStatusesIfCurrentStatus(
+                ctx,
+                orderIDs,
+                "shipping",   // fromStatus
+                "delivering", // newStatus
+            )
+            if err != nil {
+                return err
+            }
+
+            log.Printf("Updated status from 'shipping' to 'delivering' for %d/%d orders", rows, len(orderIDs))
+            return nil
+        })
+    })
+    if err != nil {
+        return nil, err
+    }
+    return &plan, nil
 }
 
 func (s *RobotService) UpdateOrderStatus(ctx context.Context, orderID int64, newStatus string) error {
