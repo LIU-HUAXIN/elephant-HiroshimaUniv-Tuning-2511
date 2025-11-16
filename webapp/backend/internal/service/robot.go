@@ -66,6 +66,7 @@ func (s *RobotService) GenerateDeliveryPlan(ctx context.Context, robotID string,
     return &plan, nil
 }
 
+
 func (s *RobotService) UpdateOrderStatus(ctx context.Context, orderID int64, newStatus string) error {
 	return utils.WithTimeout(ctx, func(ctx context.Context) error {
 		return s.store.OrderRepo.UpdateStatuses(ctx, []int64{orderID}, newStatus)
