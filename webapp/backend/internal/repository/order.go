@@ -117,7 +117,8 @@ func (r *OrderRepository) ListOrders(ctx context.Context, userID int, req model.
 
 	// 2. 构建主查询 (変更なし)
 	queryArgs := []interface{}{userID}
-	query := `
+	var queryBuilder strings.Builder
+	queryBuilder.WriteString(`
         SELECT
             o.order_id,
             o.product_id,
@@ -128,7 +129,7 @@ func (r *OrderRepository) ListOrders(ctx context.Context, userID int, req model.
         FROM orders o
         JOIN products p ON o.product_id = p.product_id
         WHERE o.user_id = ?
-    `
+    `)
 
 	// 添加搜索条件 (変更なし)
 	if req.Search != "" {
@@ -138,7 +139,7 @@ func (r *OrderRepository) ListOrders(ctx context.Context, userID int, req model.
 		} else {
 			searchPattern = "%" + req.Search + "%"
 		}
-		query += " AND p.name LIKE ?"
+		queryBuilder.WriteString(" AND p.name LIKE ?")
 		queryArgs = append(queryArgs, searchPattern)
 	}
 
@@ -158,10 +159,10 @@ func (r *OrderRepository) ListOrders(ctx context.Context, userID int, req model.
 	if strings.ToUpper(req.SortOrder) == "ASC" {
 		sortOrder = "ASC"
 	}
-	query += fmt.Sprintf(" ORDER BY %s %s, o.order_id ASC", sortField, sortOrder)
+	queryBuilder.WriteString(fmt.Sprintf(" ORDER BY %s %s, o.order_id ASC", sortField, sortOrder))
 
 	// 添加分页 (変更なし)
-	query += " LIMIT ? OFFSET ?"
+	queryBuilder.WriteString(" LIMIT ? OFFSET ?")
 	queryArgs = append(queryArgs, req.PageSize, req.Offset)
 
 
@@ -178,9 +179,9 @@ func (r *OrderRepository) ListOrders(ctx context.Context, userID int, req model.
 	}
 	var ordersRaw []orderRow
 
-	if err := r.db.SelectContext(ctx, &ordersRaw, query, queryArgs...); err != nil {
-		return nil, 0, err
-	}
+	if err := r.db.SelectContext(ctx, &ordersRaw, queryBuilder.String(), queryArgs...); err != nil {
+        return nil, 0, err
+    }
 
     // 4. 转换数据
 	// 修正： 'orderRow' から 'model.Order' へ手動でマッピングする
@@ -205,12 +206,14 @@ func (r *OrderRepository) ListOrders(ctx context.Context, userID int, req model.
 func (r *OrderRepository) GetTotalOrdersCount(ctx context.Context, userID int, req model.ListRequest) (int, error) {
 	var total int
 	queryArgs := []interface{}{userID}
-	query := `
+
+	var queryBuilder strings.Builder
+	queryBuilder.WriteString(`
         SELECT COUNT(o.order_id)
         FROM orders o
         JOIN products p ON o.product_id = p.product_id
         WHERE o.user_id = ?
-    `
+    `)
 
 	if req.Search != "" {
 		searchPattern := ""
@@ -219,10 +222,10 @@ func (r *OrderRepository) GetTotalOrdersCount(ctx context.Context, userID int, r
 		} else {
 			searchPattern = "%" + req.Search + "%"
 		}
-		query += " AND p.name LIKE ?"
+		queryBuilder.WriteString(" AND p.name LIKE ?")
 		queryArgs = append(queryArgs, searchPattern)
 	}
 
-	err := r.db.GetContext(ctx, &total, query, queryArgs...)
+	err := r.db.GetContext(ctx, &total, queryBuilder.String(), queryArgs...)
 	return total, err
 }
