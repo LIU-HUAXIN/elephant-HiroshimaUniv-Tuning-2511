@@ -20,17 +20,36 @@ func NewOrderRepository(db DBTX) *OrderRepository {
 
 // 注文を作成し、生成された注文IDを返す
 func (r *OrderRepository) Create(ctx context.Context, order *model.Order) (string, error) {
-	query := `INSERT INTO orders (user_id, product_id, shipped_status, created_at) VALUES (?, ?, 'shipping', NOW())`
-	result, err := r.db.ExecContext(ctx, query, order.UserID, order.ProductID)
-	if err != nil {
-		return "", err
-	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%d", id), nil
+    query := `
+        INSERT INTO orders (
+            user_id,
+            product_id,
+            shipped_status,
+            created_at,
+            value,
+            weight
+        )
+        SELECT
+            ?,             -- user_id
+            p.product_id,  -- product_id
+            'shipping',    -- shipped_status
+            NOW(),         -- created_at
+            p.value,       -- value
+            p.weight       -- weight
+        FROM products p
+        WHERE p.product_id = ?
+    `
+    result, err := r.db.ExecContext(ctx, query, order.UserID, order.ProductID)
+    if err != nil {
+        return "", err
+    }
+    id, err := result.LastInsertId()
+    if err != nil {
+        return "", err
+    }
+    return fmt.Sprintf("%d", id), nil
 }
+
 
 // 複数の注文IDのステータスを一括で更新
 // 主に配送ロボットが注文を引き受けた際に一括更新をするために使用
@@ -89,19 +108,19 @@ func (r *OrderRepository) UpdateStatusesIfCurrentStatus(
 
 // 配送中(shipped_status:shipping)の注文一覧を取得
 func (r *OrderRepository) GetShippingOrders(ctx context.Context) ([]model.Order, error) {
-	var orders []model.Order
-	query := `
+    var orders []model.Order
+    query := `
         SELECT
             o.order_id,
-            p.weight,
-            p.value
+            o.weight,
+            o.value
         FROM orders o
-        JOIN products p ON o.product_id = p.product_id
         WHERE o.shipped_status = 'shipping'
     `
-	err := r.db.SelectContext(ctx, &orders, query)
-	return orders, err
+    err := r.db.SelectContext(ctx, &orders, query)
+    return orders, err
 }
+
 
 
 // 注文履歴一覧を取得 (Optimized)
