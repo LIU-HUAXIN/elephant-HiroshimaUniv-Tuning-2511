@@ -58,19 +58,54 @@ func (s *RobotService) UpdateOrderStatus(ctx context.Context, orderID int64, new
 }
 
 // selectOrdersForDelivery (Optimized with Dynamic Programming)
-// This function solves the 0/1 Knapsack Problem efficiently.
 func selectOrdersForDelivery(ctx context.Context, orders []model.Order, robotID string, robotCapacity int) (model.DeliveryPlan, error) {
-    n := len(orders)
-    if n == 0 {
+    // --- 0. trivial cases ---
+    if robotCapacity <= 0 || len(orders) == 0 {
         return model.DeliveryPlan{RobotID: robotID}, nil
     }
 
-    // dp[i][w] stores the maximum value using the first 'i' items with a weight limit of 'w'.
-    // We use n+1 and robotCapacity+1 to handle 1-based indexing easily.
+    // --- 1. 预过滤：去掉根本不可能装上的货 & 没价值的货 ---
+    filtered := make([]model.Order, 0, len(orders))
+    totalWeight := 0
+    totalValue := 0
+
+    for _, o := range orders {
+        // weight <= 0 或 value <= 0 的货对得分没有帮助，直接跳过
+        if o.Weight <= 0 || o.Value <= 0 {
+            continue
+        }
+        // 比机器人容量还重的货，不可能选中，也跳过
+        if o.Weight > robotCapacity {
+            continue
+        }
+
+        filtered = append(filtered, o)
+        totalWeight += o.Weight
+        totalValue += o.Value
+    }
+
+    orders = filtered
+    if len(orders) == 0 {
+        // 过滤完啥也没有了
+        return model.DeliveryPlan{RobotID: robotID}, nil
+    }
+
+    // --- 2. 早退出：所有货物总重本来就 <= 容量，直接全装上 ---
+    if totalWeight <= robotCapacity {
+        return model.DeliveryPlan{
+            RobotID:     robotID,
+            TotalWeight: totalWeight,
+            TotalValue:  totalValue,
+            Orders:      orders,
+        }, nil
+    }
+
+    n := len(orders)
+
+    // --- 3. DP table ---
+    // dp[i][w] = 使用前 i 个货物、容量 w 时能得到的最大 value
     dp := make([][]int, n+1)
-    
-    // 'choice[i][w]' tracks whether we *included* item 'i' to get the max value at dp[i][w].
-    // This is necessary to reconstruct the list of orders.
+    // choice[i][w] = 在得到 dp[i][w] 的时候，第 i 个货物是否被选中
     choice := make([][]bool, n+1)
 
     for i := 0; i <= n; i++ {
@@ -78,70 +113,64 @@ func selectOrdersForDelivery(ctx context.Context, orders []model.Order, robotID 
         choice[i] = make([]bool, robotCapacity+1)
     }
 
-    // --- 1. Building the DP Table ---
-    // Iterate through each order (item)
+    // --- 4. 填 DP 表 ---
     for i := 1; i <= n; i++ {
-        // Get the actual order details. (i-1 because 'orders' is 0-indexed)
-        order := orders[i-1]
-        weight := order.Weight
-        value := order.Value
-        
-        // Check for context cancellation every 'n' items (can be adjusted)
-        if i % 1024 == 0 {
-             select {
+        ord := orders[i-1]
+        w := ord.Weight
+        v := ord.Value
+
+        // 每隔一段检查一下 context，防止极端情况下超时
+        if i%512 == 0 {
+            select {
             case <-ctx.Done():
                 return model.DeliveryPlan{}, ctx.Err()
             default:
             }
         }
 
-        // Iterate through each possible capacity 'w'
-        for w := 0; w <= robotCapacity; w++ {
-            
-            // Option 1: Don't include the current item 'i'.
-            // The value is the same as the best value without this item.
-            dp[i][w] = dp[i-1][w]
-            choice[i][w] = false // Mark as 'not taken'
+        for c := 0; c <= robotCapacity; c++ {
+            // 方案 A: 不选第 i 个
+            best := dp[i-1][c]
 
-            // Option 2: Include the current item 'i' (if it fits)
-            if w >= weight {
-                // Value if we *do* take this item
-                valueWithItem := dp[i-1][w-weight] + value
+            // 方案 B: 选第 i 个（前提是装得下）
+            take := -1
+            if w <= c {
+                take = dp[i-1][c-w] + v
+            }
 
-                // If taking the item gives a better value, update dp and 'choice'
-                if valueWithItem > dp[i][w] {
-                    dp[i][w] = valueWithItem
-                    choice[i][w] = true // Mark as 'taken'
-                }
+            if take > best {
+                dp[i][c] = take
+                choice[i][c] = true
+            } else {
+                dp[i][c] = best
+                choice[i][c] = false
             }
         }
     }
 
-    // The best possible value is now in dp[n][robotCapacity]
-    bestValue := dp[n][robotCapacity]
-    
-    // --- 2. Backtracking to find the selected orders ---
-    var bestSet []model.Order
-    totalWeight := 0
-    curCap := robotCapacity // Start from the full capacity
+    // --- 5. 反向回溯出被选中的订单 ---
+    capLeft := robotCapacity
+    bestValue := dp[n][capLeft]
+    selected := make([]model.Order, 0, n)
+    totalSelectedWeight := 0
 
-    for i := n; i > 0; i-- {
-        // Check if we decided to take item 'i' at this capacity
-        if choice[i][curCap] {
-            order := orders[i-1]
-            bestSet = append(bestSet, order)
-            totalWeight += order.Weight
-            curCap -= order.Weight // Reduce capacity for the next check
+    for i := n; i >= 1; i-- {
+        if capLeft <= 0 {
+            break
         }
+        if !choice[i][capLeft] {
+            continue
+        }
+        ord := orders[i-1]
+        selected = append(selected, ord)
+        totalSelectedWeight += ord.Weight
+        capLeft -= ord.Weight
     }
-    
-    // Note: 'bestSet' will be in reverse order of processing, 
-    // but the order of items in the plan doesn't matter.
 
     return model.DeliveryPlan{
         RobotID:     robotID,
-        TotalWeight: totalWeight,
+        TotalWeight: totalSelectedWeight,
         TotalValue:  bestValue,
-        Orders:      bestSet,
+        Orders:      selected,
     }, nil
 }
